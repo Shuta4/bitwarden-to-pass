@@ -1,0 +1,162 @@
+#!/usr/bin/python
+
+import json
+import os.path as path
+import os
+from subprocess import Popen, PIPE
+
+remembered_paths = {}
+
+def parse_args():
+
+    import sys
+
+    def compare_arg(arg, short, long):
+        if arg == f"-{short}" or arg == f"--{long}":
+            return True
+        return False
+
+    result = {
+        "help": False,
+        "bw_export": ""
+    }
+
+    for i in range(1, len(sys.argv)):
+
+        if compare_arg(sys.argv[i], "h", "help"):
+            result["help"] = True
+
+        result["bw_export"] = path.abspath(sys.argv[i])
+
+    return result
+
+def get_bw_folders(data):
+    result = {}
+
+    for el in data.get("folders", []):
+        result[el["id"]] = el["name"]
+
+    return result
+
+def check_path(path):
+    global remembered_paths
+
+    if remembered_paths.get(path) is not None:
+        path_counter = 0
+
+        last_part = path.split(".")[-1]
+        if last_part.isdigit():
+            path_counter = int(last_part) + 1
+
+        if path_counter == 0:
+            path = f"{path}.{path_counter}"
+        else:
+            path = '.'.join(path.split('.')[0:-1] + [str(path_counter)])
+
+    remembered_paths[path] = True
+
+    return path
+
+def get_item_path(item, folders):
+    path = item.get("name", "noname")
+
+    folder = folders.get(item.get("folderId", None), None)
+    if folder is not None:
+        path = f"{folder}/{path}"
+
+    return check_path(path)
+
+def write_file(path, value):
+    p = Popen(
+        ["pass", "insert", "-m", path],
+        universal_newlines=True,
+        env=os.environ,
+        stdin=PIPE,
+        stdout=PIPE,
+        stderr=PIPE,
+        shell=False
+    )
+    (stdout, stderr) = p.communicate(value)
+    res = p.wait()
+    if res:
+        print(f"{stderr} {stdout}")
+
+def migrate_fields(item_path, item):
+    for el in item.get("fields", []):
+        write_file(
+            check_path(f"{item_path}.d/fields/{el.get('name', 'noname')}"),
+            el.get("value", "")
+        )
+
+def migrate_notes(item_path, item):
+    if item.get("notes", None) is None:
+        return
+
+    write_file(
+        check_path(f"{item_path}.d/notes"),
+        item.get("notes", "")
+    )
+
+def migrate_password(item, folders):
+    item_path = get_item_path(item, folders)
+
+    migrate_fields(item_path, item)
+    migrate_notes(item_path, item)
+
+    write_file(f"{item_path}.d/username", item.get("login", {}).get("username", ""))
+    write_file(item_path, item.get("login", {}).get("password", ""))
+
+def migrate_note(item, folders):
+    item_path = get_item_path(item, folders)
+
+    migrate_fields(item_path, item)
+    write_file(item_path, item.get("notes", ""))
+
+def migrate_card(item, folders):
+    item_path = get_item_path(item, folders)
+
+    migrate_fields(item_path, item)
+    migrate_notes(item_path, item)
+    write_file(item_path, item.get("card", {}).get("number", ""))
+    write_file(f"{item_path}.d/cardholder", item.get("card", {}).get("cardholderName", ""))
+    write_file(
+        f"{item_path}.d/expiration",
+        f"{item.get('card').get('expMonth', '')}/{item.get('card').get('expYear', '')}"
+    )
+    write_file(f"{item_path}.d/code", item.get("card", {}).get("code", ""))
+
+def bw_item_type_factory(item, folders):
+    if item.get("type") == 1:
+        migrate_password(item, folders)
+
+    elif item.get("type") == 2:
+        migrate_note(item, folders)
+
+    elif item.get("type") == 3:
+        migrate_card(item, folders)
+
+    else:
+        print(f"Item type {item.get('type')} is not supported, skipping.")
+
+def migrate(data):
+    folders = get_bw_folders(data)
+
+    for item in data.get("items", []):
+        bw_item_type_factory(item, folders)
+
+def main():
+
+    options = parse_args()
+
+    if options["help"]:
+        print("Usage: bitwarden-to-pass </path/to/bw/export.json>")
+        exit(0)
+
+    if not path.isfile(options["bw_export"]):
+        print(f"No such file: {options['bw_export']}")
+        exit(1)
+
+    bw_data = json.load(open(options["bw_export"], "r"))
+    migrate(bw_data)
+
+main()
